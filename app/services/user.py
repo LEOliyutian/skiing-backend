@@ -5,11 +5,18 @@ import random
 import string
 import re
 import requests
+import logging
 from bson import ObjectId
 from app.database import users_collection, verification_codes_collection
 from app.models.user import UserInDB, UserCreate, UserInfo, Token
 from app.auth.jwt import get_password_hash, verify_password, create_tokens
 from app.config import settings
+# 导入整个模块，而不是具体的实例
+import app.services.email as email_module
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 async def get_user_by_id(user_id: str) -> Optional[UserInDB]:
     """根据ID获取用户"""
@@ -28,9 +35,9 @@ async def get_user_by_username(username: str) -> Optional[UserInDB]:
         return UserInDB(**user)
     return None
 
-async def get_user_by_phone(phone: str) -> Optional[UserInDB]:
-    """根据手机号获取用户"""
-    user = await users_collection.find_one({"phone": phone})
+async def get_user_by_email(email: str) -> Optional[UserInDB]:
+    """根据邮箱获取用户"""
+    user = await users_collection.find_one({"email": email})
     if user:
         return UserInDB(**user)
     return None
@@ -44,47 +51,51 @@ async def get_user_by_openid(openid: str) -> Optional[UserInDB]:
 
 async def create_user(user_data: UserCreate) -> UserInDB:
     """创建新用户"""
-    # 验证验证码
-    await verify_code(user_data.phone, user_data.code)
-    
-    # 检查用户名和手机号是否已存在
-    existing_user = await get_user_by_username(user_data.username)
-    if existing_user:
-        raise ValueError("用户名已存在")
-    
-    existing_phone = await get_user_by_phone(user_data.phone)
-    if existing_phone:
-        raise ValueError("手机号已被注册")
-    
-    # 创建用户
-    hashed_password = get_password_hash(user_data.password)
-    user_dict = {
-        "username": user_data.username,
-        "phone": user_data.phone,
-        "nickname": user_data.username,
-        "hashed_password": hashed_password,
-        "avatar": None,
-        "email": None,
-        "gender": 0,
-        "level": 0,
-        "balance": 0.0,
-        "is_active": True,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
-        "last_login_at": None
-    }
-    
-    result = await users_collection.insert_one(user_dict)
-    user_dict["_id"] = result.inserted_id
-    
-    return UserInDB(**user_dict)
+    try:
+        # 验证验证码
+        await verify_code(user_data.email, user_data.code)
+        
+        # 检查用户名和邮箱是否已存在
+        existing_user = await get_user_by_username(user_data.username)
+        if existing_user:
+            raise ValueError("用户名已存在")
+        
+        existing_email = await get_user_by_email(user_data.email)
+        if existing_email:
+            raise ValueError("邮箱已被注册")
+        
+        # 创建用户
+        hashed_password = get_password_hash(user_data.password)
+        user_dict = {
+            "username": user_data.username,
+            "email": user_data.email,
+            "nickname": user_data.username,
+            "hashed_password": hashed_password,
+            "avatar": None,
+            "phone": None,
+            "gender": 0,
+            "level": 0,
+            "balance": 0.0,
+            "is_active": True,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "last_login_at": None
+        }
+        
+        result = await users_collection.insert_one(user_dict)
+        user_dict["_id"] = result.inserted_id
+        
+        return UserInDB(**user_dict)
+    except Exception as e:
+        logger.error(f"创建用户失败: {str(e)}")
+        raise ValueError(f"创建用户失败: {str(e)}")
 
 async def authenticate_user(username: str, password: str) -> Optional[UserInDB]:
     """验证用户凭据"""
-    # 支持用户名或手机号登录
+    # 支持用户名或邮箱登录
     user = await get_user_by_username(username)
     if not user:
-        user = await get_user_by_phone(username)
+        user = await get_user_by_email(username)
         
     if not user:
         return None
@@ -139,11 +150,11 @@ async def authenticate_wechat(code: str, user_info: Optional[Dict[str, Any]] = N
             user_dict = {
                 "username": username,
                 "nickname": nickname,
-                "phone": "",  # 微信用户可能没有绑定手机号
+                "email": None,  # 微信用户可能没有绑定邮箱
                 "openid": openid,
                 "hashed_password": get_password_hash(openid),  # 使用openid作为初始密码
                 "avatar": avatar,
-                "email": None,
+                "phone": None,
                 "gender": gender,
                 "level": 0,
                 "balance": 0.0,
@@ -194,12 +205,13 @@ async def authenticate_wechat(code: str, user_info: Optional[Dict[str, Any]] = N
                 "username": user.username,
                 "nickname": user.nickname,
                 "avatar": user.avatar,
-                "phone": user.phone,
+                "email": user.email,
                 "is_new_user": is_new_user
             }
         }
         
     except Exception as e:
+        logger.error(f"微信登录处理失败: {str(e)}")
         raise ValueError(f"微信登录处理失败: {str(e)}")
 
 async def get_user_info(user_id: str) -> UserInfo:
@@ -212,9 +224,9 @@ async def get_user_info(user_id: str) -> UserInfo:
         id=str(user.id),
         username=user.username,
         nickname=user.nickname,
-        phone=user.phone,
-        avatar=user.avatar,
         email=user.email,
+        avatar=user.avatar,
+        phone=user.phone,
         gender=user.gender,
         level=user.level,
         balance=user.balance,
@@ -249,99 +261,112 @@ async def generate_verification_code() -> str:
     """生成6位数字验证码"""
     return ''.join(random.choices(string.digits, k=6))
 
-async def send_verification_code(phone: str) -> str:
+async def send_verification_code(email: str) -> str:
     """发送验证码"""
-    # 检查手机号格式
-    if not phone or not re.match(r"^1[3-9]\d{9}$", phone):
-        raise ValueError("手机号格式不正确")
+    logger.info(f"尝试向 {email} 发送验证码")
+    
+    # 检查邮箱格式
+    if not email or not re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email):
+        logger.error(f"邮箱格式不正确: {email}")
+        raise ValueError("邮箱格式不正确")
     
     # 检查发送频率 - 1分钟内只能发送一次
     recent_code = await verification_codes_collection.find_one(
-        {"phone": phone, "created_at": {"$gt": datetime.utcnow() - timedelta(minutes=1)}}
+        {"email": email, "created_at": {"$gt": datetime.utcnow() - timedelta(minutes=1)}}
     )
     if recent_code:
+        logger.warning(f"发送过于频繁: {email}")
         raise ValueError("发送过于频繁，请稍后再试")
     
     # 生成验证码
     code = await generate_verification_code()
-    expires_at = datetime.utcnow() + timedelta(minutes=settings.SMS_EXPIRE_MINUTES)
+    logger.info(f"为 {email} 生成验证码: {code}")
+    
+    current_time = datetime.utcnow()
+    expires_at = current_time + timedelta(minutes=5)  # 5分钟有效期
     
     # 存储验证码
-    await verification_codes_collection.update_one(
-        {"phone": phone},
+    result = await verification_codes_collection.update_one(
+        {"email": email},
         {"$set": {
             "code": code,
-            "created_at": datetime.utcnow(),
+            "created_at": current_time,
             "expires_at": expires_at
         }},
         upsert=True
     )
     
-    # 集成短信发送服务
-    # 这里是调用短信服务的代码，现在先打印到控制台
-    print(f"【登山滑雪俱乐部】验证码：{code}，有效期5分钟。如非本人操作，请忽略此消息。")
+    logger.info(f"验证码存储结果: modified={result.modified_count}, upserted={result.upserted_id is not None}")
     
-    # 实际项目中，应集成短信服务商的API
-    # 例如阿里云短信服务:
-    # import json
-    # from aliyunsdkcore.client import AcsClient
-    # from aliyunsdkcore.request import CommonRequest
+    # 发送验证码邮件 - 使用模块中的实例
+    success = await email_module.email_service.send_verification_code(email, code)
+    if not success:
+        logger.error(f"验证码邮件发送失败: {email}")
+        raise ValueError("验证码发送失败，请稍后重试")
     
-    # client = AcsClient(settings.SMS_ACCESS_KEY_ID, settings.SMS_ACCESS_KEY_SECRET, 'cn-hangzhou')
-    # request = CommonRequest()
-    # request.set_domain('dysmsapi.aliyuncs.com')
-    # request.set_version('2017-05-25')
-    # request.set_action_name('SendSms')
-    # request.add_query_param('PhoneNumbers', phone)
-    # request.add_query_param('SignName', '登山滑雪俱乐部')
-    # request.add_query_param('TemplateCode', settings.SMS_TEMPLATE_CODE)
-    # request.add_query_param('TemplateParam', json.dumps({'code': code}))
-    # response = client.do_action_with_exception(request)
-    
+    logger.info(f"成功向 {email} 发送验证码")
     return code
 
-async def verify_code(phone: str, code: str) -> bool:
-    """验证短信验证码"""
-    # 获取验证码记录
-    verification = await verification_codes_collection.find_one({"phone": phone})
+async def verify_code(email: str, code: str) -> bool:
+    """验证邮箱验证码"""
+    logger.info(f"开始验证 {email} 的验证码")
+    
+    if not code:
+        logger.error("验证码不能为空")
+        raise ValueError("验证码不能为空")
+    
+    # 格式化验证码（去除空格）
+    formatted_code = code.strip()
+    
+    # 获取有效的验证码记录
+    verification = await verification_codes_collection.find_one({
+        "email": email,
+        "expires_at": {"$gt": datetime.utcnow()}  # 只查找未过期的验证码
+    })
     
     if not verification:
+        logger.warning(f"验证码不存在或已过期: {email}")
+        # 调试: 查看是否有过期的验证码
+        expired_code = await verification_codes_collection.find_one({"email": email})
+        if expired_code:
+            expired_at = expired_code.get('expires_at')
+            current_time = datetime.utcnow()
+            logger.debug(f"找到过期的验证码: {expired_code.get('code')}, 过期时间: {expired_at}, 当前时间: {current_time}, 差异: {(current_time - expired_at).total_seconds()}秒")
         raise ValueError("验证码不存在或已过期")
     
-    stored_code = verification.get("code")
-    expires_at = verification.get("expires_at")
+    stored_code = verification.get("code", "").strip()
+    logger.info(f"数据库中的验证码: {stored_code}, 用户输入的验证码: {formatted_code}")
     
     # 检查验证码是否正确
-    if stored_code != code:
+    if stored_code != formatted_code:
+        logger.warning(f"验证码不匹配: 期望 {stored_code}, 收到 {formatted_code}")
         raise ValueError("验证码错误")
     
-    # 检查验证码是否过期
-    if datetime.utcnow() > expires_at:
-        raise ValueError("验证码已过期")
-    
     # 验证成功后删除验证码
-    await verification_codes_collection.delete_one({"phone": phone})
+    delete_result = await verification_codes_collection.delete_one({"email": email})
+    logger.info(f"验证成功，删除验证码记录: {delete_result.deleted_count}")
     
     return True
 
-async def login_with_phone(phone: str, code: str) -> Dict[str, Any]:
-    """手机验证码登录"""
+async def login_with_email(email: str, code: str) -> Dict[str, Any]:
+    """邮箱验证码登录"""
     # 验证验证码
     try:
-        await verify_code(phone, code)
+        await verify_code(email, code)
     except ValueError as e:
+        logger.error(f"验证码验证失败: {str(e)}")
         raise ValueError(f"验证码验证失败: {str(e)}")
     
     # 查找用户
-    user = await get_user_by_phone(phone)
+    user = await get_user_by_email(email)
     is_new_user = False
     
     if not user:
         # 创建新用户
-        username = f"phone_{phone[-4:]}"
+        username = f"email_{email.split('@')[0]}"
         i = 1
         while await get_user_by_username(username):
-            username = f"phone_{phone[-4:]}_{i}"
+            username = f"email_{email.split('@')[0]}_{i}"
             i += 1
         
         # 为新用户生成随机密码
@@ -350,11 +375,11 @@ async def login_with_phone(phone: str, code: str) -> Dict[str, Any]:
         
         user_dict = {
             "username": username,
-            "nickname": f"用户{phone[-4:]}",
-            "phone": phone,
+            "nickname": f"用户{email.split('@')[0]}",
+            "email": email,
             "hashed_password": hashed_password,
             "avatar": None,
-            "email": None,
+            "phone": None,
             "gender": 0,
             "level": 0,
             "balance": 0.0,
@@ -386,6 +411,96 @@ async def login_with_phone(phone: str, code: str) -> Dict[str, Any]:
             "username": user.username,
             "nickname": user.nickname,
             "avatar": user.avatar,
+            "email": user.email,
+            "is_new_user": is_new_user
+        }
+    }
+
+async def bind_user_email(user_id: str, email: str, code: str) -> bool:
+    """绑定用户邮箱"""
+    # 验证验证码
+    try:
+        await verify_code(email, code)
+    except ValueError as e:
+        logger.error(f"验证码验证失败: {str(e)}")
+        raise ValueError(f"验证码验证失败: {str(e)}")
+    
+    # 检查邮箱是否已被其他用户绑定
+    existing_user = await get_user_by_email(email)
+    if existing_user and str(existing_user.id) != user_id:
+        raise ValueError("该邮箱已被其他账号绑定")
+    
+    # 更新用户邮箱
+    await users_collection.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {
+            "email": email,
+            "updated_at": datetime.utcnow()
+        }}
+    )
+    
+    return True
+
+async def login_with_phone(phone: str, code: str) -> Dict[str, Any]:
+    """手机验证码登录"""
+    # 验证验证码
+    try:
+        await verify_code(phone, code)
+    except ValueError as e:
+        logger.error(f"验证码验证失败: {str(e)}")
+        raise ValueError(f"验证码验证失败: {str(e)}")
+    
+    # 查找用户
+    user = await users_collection.find_one({"phone": phone})
+    
+    if not user:
+        # 如果用户不存在，创建新用户
+        username = f"user_{phone[-4:]}"
+        i = 1
+        while await get_user_by_username(username):
+            username = f"user_{phone[-4:]}_{i}"
+            i += 1
+        
+        user_dict = {
+            "username": username,
+            "nickname": username,
+            "email": None,
+            "phone": phone,
+            "hashed_password": get_password_hash(phone),  # 使用手机号作为初始密码
+            "avatar": None,
+            "gender": 0,
+            "level": 0,
+            "balance": 0.0,
+            "is_active": True,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "last_login_at": datetime.utcnow()
+        }
+        
+        result = await users_collection.insert_one(user_dict)
+        user_dict["_id"] = result.inserted_id
+        user = UserInDB(**user_dict)
+        is_new_user = True
+    else:
+        user = UserInDB(**user)
+        # 更新最后登录时间
+        await users_collection.update_one(
+            {"_id": ObjectId(user.id)},
+            {"$set": {"last_login_at": datetime.utcnow()}}
+        )
+        is_new_user = False
+    
+    # 生成token
+    tokens = create_tokens(str(user.id))
+    
+    # 返回用户信息和token
+    return {
+        "tokens": tokens,
+        "user": {
+            "id": str(user.id),
+            "username": user.username,
+            "nickname": user.nickname,
+            "avatar": user.avatar,
             "phone": user.phone,
             "is_new_user": is_new_user
         }
@@ -397,20 +512,26 @@ async def bind_user_phone(user_id: str, phone: str, code: str) -> bool:
     try:
         await verify_code(phone, code)
     except ValueError as e:
+        logger.error(f"验证码验证失败: {str(e)}")
         raise ValueError(f"验证码验证失败: {str(e)}")
     
     # 检查手机号是否已被其他用户绑定
-    existing_user = await get_user_by_phone(phone)
-    if existing_user and str(existing_user.id) != user_id:
-        raise ValueError("该手机号已被其他账号绑定")
+    existing_user = await users_collection.find_one({"phone": phone})
+    if existing_user and str(existing_user["_id"]) != user_id:
+        raise ValueError("该手机号已被其他用户绑定")
     
     # 更新用户手机号
-    await users_collection.update_one(
+    result = await users_collection.update_one(
         {"_id": ObjectId(user_id)},
-        {"$set": {
-            "phone": phone,
-            "updated_at": datetime.utcnow()
-        }}
+        {
+            "$set": {
+                "phone": phone,
+                "updated_at": datetime.utcnow()
+            }
+        }
     )
+    
+    if result.modified_count == 0:
+        raise ValueError("用户不存在")
     
     return True

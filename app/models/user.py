@@ -5,11 +5,22 @@ from pydantic import BaseModel, Field, EmailStr
 
 class UserBase(BaseModel):
     username: str
-    phone: str
+    email: Optional[EmailStr] = None
+    nickname: Optional[str] = None
+    avatar: Optional[str] = None
+    gender: Optional[int] = 0
+    level: Optional[int] = 0
+    balance: Optional[float] = 0.0
     
 class UserCreate(UserBase):
     password: str
     code: str  # 验证码
+    
+class UserUpdate(BaseModel):
+    nickname: Optional[str] = None
+    avatar: Optional[str] = None
+    email: Optional[EmailStr] = None
+    gender: Optional[int] = None
     
 class UserLogin(BaseModel):
     username: str  # 用户名或手机号
@@ -18,51 +29,38 @@ class UserLogin(BaseModel):
 class UserInDB(UserBase):
     id: str = Field(..., alias="_id")
     hashed_password: str
-    avatar: Optional[str] = None
-    nickname: Optional[str] = None
-    openid: Optional[str] = None
-    email: Optional[EmailStr] = None
-    gender: Optional[int] = None  # 0:未知 1:男 2:女
-    level: int = 0  # 用户等级
-    balance: float = 0.0  # 账户余额
     is_active: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     last_login_at: Optional[datetime] = None
     
     class Config:
-        allow_population_by_field_name = True
+        validate_by_name = True
         
     async def generate_token(self):
         from app.auth.jwt import create_tokens
         return create_tokens(str(self.id))
         
-class UserInfo(BaseModel):
+class UserInfo(UserBase):
     id: str
-    username: str
-    phone: str
-    nickname: Optional[str] = None
-    avatar: Optional[str] = None
-    email: Optional[EmailStr] = None
-    gender: Optional[int] = None
-    level: int = 0
-    balance: float = 0.0
     created_at: datetime
     
 class Token(BaseModel):
     access_token: str
-    refresh_token: Optional[str] = None
-    token_type: str
+    refresh_token: str
+    token_type: str = "bearer"
     
 class TokenData(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
     
 class VerificationCode(BaseModel):
-    phone: str
+    email: EmailStr
     code: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    expires_at: datetime
 
 class WechatLoginData(BaseModel):
     code: str
     user_info: Optional[Dict[str, Any]] = None
+
+class EmailLogin(BaseModel):
+    email: EmailStr
+    code: str
