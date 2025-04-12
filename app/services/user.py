@@ -23,6 +23,8 @@ async def get_user_by_id(user_id: str) -> Optional[UserInDB]:
     try:
         user = await users_collection.find_one({"_id": ObjectId(user_id)})
         if user:
+            # 转换_id为字符串
+            user["_id"] = str(user["_id"])
             return UserInDB(**user)
         return None
     except:
@@ -32,6 +34,8 @@ async def get_user_by_username(username: str) -> Optional[UserInDB]:
     """根据用户名获取用户"""
     user = await users_collection.find_one({"username": username})
     if user:
+        # 转换_id为字符串
+        user["_id"] = str(user["_id"])
         return UserInDB(**user)
     return None
 
@@ -39,6 +43,8 @@ async def get_user_by_email(email: str) -> Optional[UserInDB]:
     """根据邮箱获取用户"""
     user = await users_collection.find_one({"email": email})
     if user:
+        # 转换_id为字符串
+        user["_id"] = str(user["_id"])
         return UserInDB(**user)
     return None
 
@@ -46,6 +52,8 @@ async def get_user_by_openid(openid: str) -> Optional[UserInDB]:
     """根据微信openid获取用户"""
     user = await users_collection.find_one({"openid": openid})
     if user:
+        # 转换_id为字符串
+        user["_id"] = str(user["_id"])
         return UserInDB(**user)
     return None
 
@@ -83,7 +91,7 @@ async def create_user(user_data: UserCreate) -> UserInDB:
         }
         
         result = await users_collection.insert_one(user_dict)
-        user_dict["_id"] = result.inserted_id
+        user_dict["_id"] = str(result.inserted_id)  # 转换为字符串
         
         return UserInDB(**user_dict)
     except Exception as e:
@@ -119,12 +127,21 @@ async def authenticate_wechat(code: str, user_info: Optional[Dict[str, Any]] = N
         response = requests.get(url)
         data = response.json()
         
+        # 添加微信API响应日志，用于调试
+        logger.info(f"微信API响应: {data}")
+        
         if "errcode" in data and data["errcode"] != 0:
             raise ValueError(f"微信认证失败: {data.get('errmsg', '未知错误')}")
         
         openid = data.get("openid")
         if not openid:
             raise ValueError("获取微信openid失败")
+            
+        # 记录用户信息获取情况
+        if user_info:
+            logger.info(f"收到用户信息数据: {user_info}")
+        else:
+            logger.info("未收到用户信息数据")
         
         # 查找对应用户
         user = await get_user_by_openid(openid)
@@ -137,9 +154,15 @@ async def authenticate_wechat(code: str, user_info: Optional[Dict[str, Any]] = N
             gender = 0
             
             if user_info:
-                nickname = user_info.get("nickName", f"wx_{openid[:8]}")
-                avatar = user_info.get("avatarUrl")
+                # 检查不同可能的字段名
+                # 微信返回格式可能是nickName，前端传来的可能是nickname
+                nickname = user_info.get("nickName", user_info.get("nickname", f"wx_{openid[:8]}"))
+                # 微信返回格式可能是avatarUrl，前端传来的可能是avatar
+                avatar = user_info.get("avatarUrl", user_info.get("avatar"))
                 gender = user_info.get("gender", 0)
+                
+                # 记录获取到的用户信息
+                logger.info(f"从用户授权获取到信息: 昵称={nickname}, 头像={avatar}, 性别={gender}")
             
             username = f"wx_{openid[:8]}"
             i = 1
@@ -165,7 +188,7 @@ async def authenticate_wechat(code: str, user_info: Optional[Dict[str, Any]] = N
             }
             
             result = await users_collection.insert_one(user_dict)
-            user_dict["_id"] = result.inserted_id
+            user_dict["_id"] = str(result.inserted_id)  # 转换为字符串
             user = UserInDB(**user_dict)
             
             is_new_user = True
@@ -173,12 +196,24 @@ async def authenticate_wechat(code: str, user_info: Optional[Dict[str, Any]] = N
             # 更新用户信息（如果前端提供了）
             if user_info:
                 update_data = {}
-                if user_info.get("nickName") and user.nickname != user_info.get("nickName"):
-                    update_data["nickname"] = user_info.get("nickName")
-                if user_info.get("avatarUrl") and user.avatar != user_info.get("avatarUrl"):
-                    update_data["avatar"] = user_info.get("avatarUrl")
-                if user_info.get("gender") and user.gender != user_info.get("gender"):
+                
+                # 增强更新逻辑，针对多种可能的字段名和空值情况
+                new_nickname = user_info.get("nickName", user_info.get("nickname"))
+                new_avatar = user_info.get("avatarUrl", user_info.get("avatar"))
+                
+                # 只有当用户授权了信息且当前是游客名称时，才更新昵称
+                if new_nickname and (user.nickname == "游客" or user.nickname != new_nickname):
+                    update_data["nickname"] = new_nickname
+                    logger.info(f"更新用户昵称: {user.nickname} -> {new_nickname}")
+                
+                # 只有当用户授权了信息且没有头像或头像变更时，才更新头像
+                if new_avatar and user.avatar != new_avatar:
+                    update_data["avatar"] = new_avatar
+                    logger.info(f"更新用户头像: {user.avatar} -> {new_avatar}")
+                
+                if user_info.get("gender") is not None and user.gender != user_info.get("gender"):
                     update_data["gender"] = user_info.get("gender")
+                    logger.info(f"更新用户性别: {user.gender} -> {user_info.get('gender')}")
                 
                 if update_data:
                     update_data["updated_at"] = datetime.utcnow()
@@ -186,6 +221,9 @@ async def authenticate_wechat(code: str, user_info: Optional[Dict[str, Any]] = N
                         {"_id": ObjectId(user.id)},
                         {"$set": update_data}
                     )
+                    
+                    # 如果更新了数据，重新获取用户信息以保证返回最新数据
+                    user = await get_user_by_id(str(user.id))
             
             # 更新最后登录时间
             await users_collection.update_one(
@@ -197,17 +235,21 @@ async def authenticate_wechat(code: str, user_info: Optional[Dict[str, Any]] = N
         # 生成token
         tokens = create_tokens(str(user.id))
         
-        # 返回用户信息和token
+        # 返回用户信息和token - 保持与原有代码的返回格式一致
         return {
-            "tokens": tokens,
-            "user": {
-                "id": str(user.id),
-                "username": user.username,
-                "nickname": user.nickname,
-                "avatar": user.avatar,
-                "email": user.email,
-                "is_new_user": is_new_user
-            }
+            "success": True,
+            "data": {
+                "token": tokens["access_token"],  # 前端可能只期望一个token
+                "userInfo": {
+                    "id": str(user.id),
+                    "username": user.username,
+                    "nickname": user.nickname,
+                    "avatar": user.avatar,
+                    "email": user.email,
+                    "is_new_user": is_new_user
+                }
+            },
+            "message": "登录成功"
         }
         
     except Exception as e:
@@ -390,7 +432,7 @@ async def login_with_email(email: str, code: str) -> Dict[str, Any]:
         }
         
         result = await users_collection.insert_one(user_dict)
-        user_dict["_id"] = result.inserted_id
+        user_dict["_id"] = str(result.inserted_id)  # 转换为字符串
         user = UserInDB(**user_dict)
         is_new_user = True
     else:
@@ -478,10 +520,12 @@ async def login_with_phone(phone: str, code: str) -> Dict[str, Any]:
         }
         
         result = await users_collection.insert_one(user_dict)
-        user_dict["_id"] = result.inserted_id
+        user_dict["_id"] = str(result.inserted_id)  # 转换为字符串
         user = UserInDB(**user_dict)
         is_new_user = True
     else:
+        # 转换_id为字符串
+        user["_id"] = str(user["_id"])
         user = UserInDB(**user)
         # 更新最后登录时间
         await users_collection.update_one(

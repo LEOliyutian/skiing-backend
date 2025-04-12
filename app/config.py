@@ -4,7 +4,8 @@ from dotenv import load_dotenv
 
 # 加载.env文件
 load_dotenv()
-
+print("环境变量MONGODB_URL值:", os.getenv("MONGODB_URL"))
+print("是否在环境变量中:", "MONGODB_URL" in os.environ)
 class Settings:
     # 应用信息
     APP_NAME: str = "登山滑雪俱乐部API"
@@ -17,7 +18,7 @@ class Settings:
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7天
     
     # MongoDB设置
-    MONGODB_URL: str = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
+    MONGODB_URL: str = os.getenv("MONGODB_URL", "mongodb+srv://LEOliyutian:test123@skiing-backend.ua8sgqk.mongodb.net/?retryWrites=true&w=majority&appName=skiing-backend&tls=true")
     DATABASE_NAME: str = os.getenv("DATABASE_NAME", "skiing_db")
     
     # 跨域设置
@@ -40,7 +41,7 @@ class Settings:
     MAIL_USERNAME: str = os.getenv("MAIL_USERNAME", "572149964@qq.com")  # QQ邮箱账号
     MAIL_PASSWORD: str = os.getenv("MAIL_PASSWORD", "keowimkexsnebedd")  # QQ邮箱授权码
     MAIL_FROM: str = os.getenv("MAIL_FROM", "572149964@qq.com")  # 发件人邮箱
-    MAIL_PORT: int = int(os.getenv("MAIL_PORT", "587"))  # QQ邮箱SMTP端口
+    MAIL_PORT: int = int(os.getenv("MAIL_PORT", "465"))  # QQ邮箱SMTP端口
     MAIL_SERVER: str = os.getenv("MAIL_SERVER", "smtp.qq.com")  # QQ邮箱SMTP服务器
 
 settings = Settings()
